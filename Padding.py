@@ -1,69 +1,158 @@
+import os
 import pandas as pd
 import numpy as np
-import os
 from PIL import Image
-import matplotlib.pyplot as plt
 
-# 1) Read training dataset Excel file
-df = pd.read_excel("/Users/yilxu/Desktop/Document/PhD/Research/Hemang Subramanian/Technical/training_data.xlsx")
-
-# 2) Create a folder structure for label
-#    For demonstration, everything goes under label "0"
-os.makedirs("myDataForMNIST/0", exist_ok=True)
-
-# 3) Convert each row to a 28x28 image
-target_size = 784  
-
-for i, row in df.iterrows():
-    # Convert row to a NumPy array
-    arr = row.values  # shape: (num_features,)
+# ----------------------------------------------------------------
+# 1) Function to convert DataFrame rows -> 28×28 PNG images
+# ----------------------------------------------------------------
+def rows_to_mnist_images(df, output_folder="MnistForTransformer/0"):
+    """
+    Convert each row of the DataFrame (assumed in [0,1]) into a
+    28×28 grayscale PNG image. Values are scaled to [0,255].
+    Rows are padded or truncated to 784 elements.
+    """
+    os.makedirs(output_folder, exist_ok=True)
     
-    # If fewer than 784 features, pad with zeros
-    if arr.shape[0] < target_size:
-        diff = target_size - arr.shape[0]
-        arr = np.pad(arr, (0, diff), mode='constant', constant_values=0)
-    else:
-        # If there are more than 784, just truncate to first 784
-        arr = arr[:target_size]
+    data = df.values  # shape: (num_rows, num_cols)
+    data_255 = (data * 255).clip(0, 255).astype(np.uint8)
     
-    # Reshape to (28, 28)
-    arr_2d = arr.reshape(28, 28)
+    desired_len = 784  # 28 × 28
     
-    # scale values to 0–255 (typical 8-bit grayscale)
-    # Here we assume values are in [0,1]
-    arr_2d_scaled = (arr_2d * 255).astype(np.uint8)
+    for idx, row in enumerate(data_255):
+        current_len = len(row)
+        
+        # -- Pad or truncate to length 784 --
+        if current_len < desired_len:
+            diff = desired_len - current_len
+            front_pad = diff // 2
+            back_pad = diff - front_pad
+            row_padded = np.pad(row, (front_pad, back_pad), 
+                                mode='constant', constant_values=0)
+        elif current_len > desired_len:
+            diff = current_len - desired_len
+            front_cut = diff // 2
+            back_cut = diff - front_cut
+            row_padded = row[front_cut : (current_len - back_cut)]
+        else:
+            row_padded = row
+
+        # -- Reshape to 28×28 --
+        row_2d = row_padded.reshape((28, 28))
+        
+        # -- Create a grayscale image --
+        img = Image.fromarray(row_2d, mode="L")
+        
+        # -- Save as row_XXXX.png (4-digit zero-padded index) --
+        file_index = str(idx + 1).zfill(4)
+        file_name = f"row_{file_index}.png"
+        img.save(os.path.join(output_folder, file_name))
     
-    # Save the image as PNG into "myDataForMNIST/0/"
-    out_path = f"myDataForMNIST/0/row_{i}.png"
-    Image.fromarray(arr_2d_scaled).save(out_path)
+    print(f"Saved {len(data_255)} images to: {output_folder}")
 
-# 4) Print the last image processed image to see how it looks
-plt.imshow(arr_2d_scaled, cmap='gray')
-plt.title("Example: Last Row Processed as a 28x28 Image")
-plt.show()
 
-# Visualize one sample from the .ubyte file
-# Load & Inspect the Data
-import torch
-from torchvision import datasets, transforms
-import matplotlib.pyplot as plt
+# ----------------------------------------------------------------
+# 2) Function to convert all PNG images in a folder to a single .ubyte
+# ----------------------------------------------------------------
+def convert_images_to_ubyte(image_folder, output_file):
+    """
+    Convert all PNG images in 'image_folder' to a single UBYTE file,
+    stacking each flattened grayscale image as rows in a NumPy array.
+    """
+    image_data = []
+    
+    # Read each .png in sorted filename order
+    for filename in sorted(os.listdir(image_folder)):
+        if filename.lower().endswith(".png"):
+            image_path = os.path.join(image_folder, filename)
+            img = Image.open(image_path).convert("L")  # Ensure grayscale
+            arr = np.array(img, dtype=np.uint8).flatten()
+            image_data.append(arr)
+    
+    # Stack all images vertically -> shape: (num_images, 784)
+    image_data = np.vstack(image_data)
+    
+    # Write to .ubyte
+    with open(output_file, "wb") as f:
+        f.write(image_data.tobytes())
+    
+    print(f"Images successfully converted to UBYTE format -> {output_file}")
 
-# Point to the folder with new ubyte files.
-# The standard MNIST dataset class in torchvision expects the files to be in a
-# "MNIST/raw" subfolder or the same structure. 
-dataset = datasets.MNIST(
-    root='.',         
-    train=True,
-    download=False,    
-    transform=transforms.ToTensor()
-)
 
-# Now pick a sample to visualize
-img, label = dataset[0]  # The first sample
-print("Label:", label)
-print("Image shape:", img.shape)  # Typically [1, 28, 28] in PyTorch
+# ----------------------------------------------------------------
+# 3) Function to split images into train/test .ubyte files (80/20)
+# ----------------------------------------------------------------
+def convert_images_to_ubyte_split(image_folder, train_file, test_file, train_ratio=0.8):
+    """
+    Reads all PNG images in 'image_folder' (sorted by filename),
+    flattens them to 784 bytes each, and splits them into
+    train and test sets. Saves train set in 'train_file',
+    and test set in 'test_file'.
+    """
+    image_data = []
+    
+    # 1) Gather all flattened images
+    png_files = [f for f in sorted(os.listdir(image_folder)) if f.lower().endswith(".png")]
+    for filename in png_files:
+        image_path = os.path.join(image_folder, filename)
+        img = Image.open(image_path).convert("L")  # grayscale
+        arr = np.array(img, dtype=np.uint8).flatten()  # shape = (784,)
+        image_data.append(arr)
+    
+    image_data = np.vstack(image_data)  # shape = (num_images, 784)
+    num_images = image_data.shape[0]
+    
+    # 2) Shuffle them (for a random train/test split)
+    indices = np.arange(num_images)
+    np.random.shuffle(indices)
+    image_data = image_data[indices, :]  # reorder rows
+    
+    # 3) Split into train & test
+    split_index = int(train_ratio * num_images)  # 80% by default
+    train_data = image_data[:split_index, :]
+    test_data  = image_data[split_index:, :]
+    
+    # 4) Write train data to .ubyte
+    with open(train_file, "wb") as f:
+        f.write(train_data.tobytes())
+    
+    # 5) Write test data to .ubyte
+    with open(test_file, "wb") as f:
+        f.write(test_data.tobytes())
+    
+    print(f"Split {num_images} images into: {train_data.shape[0]} train, {test_data.shape[0]} test")
+    print(f"Train => {train_file}")
+    print(f"Test  => {test_file}")
 
-plt.imshow(img.squeeze(0), cmap='gray')
-plt.title(f"Label = {label}")
-plt.show()
 
+# ----------------------------------------------------------------
+# 4) Main script
+# ----------------------------------------------------------------
+if __name__ == "__main__":
+    # -- Step A: Read the Excel file --
+    excel_path = (
+        "/Users/yilxu/Desktop/Document/PhD/Research/"
+        "Hemang Subramanian/Technical/msft_data_normalized_min_max.xlsx"
+    )
+    df = pd.read_excel(excel_path)
+    
+    # -- Step B: Create folder "MnistForTransformer/0" for images --
+    image_folder = "MnistForTransformer/0"
+    os.makedirs(image_folder, exist_ok=True)
+    
+    # -- Step C: Convert each row to 28×28 PNGs in the folder --
+    rows_to_mnist_images(df, output_folder=image_folder)
+    
+    # -- Step D1: (Optional) Convert all PNG images to a single .ubyte file --
+    ubyte_file_path = "images.ubyte"
+    convert_images_to_ubyte(image_folder, ubyte_file_path)
+    
+    # -- Step D2: Split into train and test .ubyte files, 80/20 --
+    train_ubyte_file = "train_images.ubyte"
+    test_ubyte_file  = "test_images.ubyte"
+    convert_images_to_ubyte_split(
+        image_folder=image_folder,
+        train_file=train_ubyte_file,
+        test_file=test_ubyte_file,
+        train_ratio=0.8
+    )
